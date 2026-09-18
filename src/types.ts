@@ -9,3 +9,34 @@ export interface InquiryFormData {
 }
 
 export type FormErrors = Partial<Record<keyof InquiryFormData, string>>;
+
+export interface AIAnalysisResult {
+  summary: string;
+  serviceCategory: string;
+  scopeComplexity: string;
+  estimatedTimeline: string;
+  keyDeliverables: string[];
+  budgetFeasibility: string;
+  recommendations: string[];
+  clarificationQuestions: string[];
+}
+
+export interface QuoteServiceItem {
+  name: string;
+  complexity: 'Basic' | 'Standard' | 'Advanced';
+  price: number;
+}
+
+export interface QuoteDraft {
+  customer_name: string;
+  company_name: string;
+  services: QuoteServiceItem[];
+  subtotal: number;
+  discount: number;
+  total: number;
+  timeline: string;
+  payment_terms: string;
+  complexity_estimated?: boolean;
+  notes?: string;
+}
+
