@@ -1,22 +1,29 @@
 import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
-import {defineConfig} from 'vite';
+import { defineConfig } from 'vite';
+
+// Detect if running within AI Studio preview environment
+const isAiStudioPreview = Boolean(
+  process.env.DISABLE_HMR === 'true' ||
+  process.env.APPLET_ID ||
+  process.env.APP_URL?.includes('ais-') ||
+  process.env.K_SERVICE?.startsWith('ais-')
+);
 
 export default defineConfig(() => {
   return {
     plugins: [react(), tailwindcss()],
     resolve: {
       alias: {
-        '@': path.resolve(__dirname, '.'),
+        '@': path.resolve(import.meta.dirname, '.'),
       },
     },
     server: {
-      // HMR is disabled in AI Studio via DISABLE_HMR env var.
-      // Do not modifyâfile watching is disabled to prevent flickering during agent edits.
-      hmr: process.env.DISABLE_HMR !== 'true',
-      // Disable file watching when DISABLE_HMR is true to save CPU during agent edits.
-      watch: process.env.DISABLE_HMR === 'true' ? null : {},
+      // Explicitly set hmr: false in AI Studio preview to suppress the WebSocket closure error
+      hmr: isAiStudioPreview ? false : true,
+      // Disable file watching when in AI Studio preview to save CPU during agent edits
+      watch: isAiStudioPreview ? null : {},
     },
   };
 });

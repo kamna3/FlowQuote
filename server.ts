@@ -192,8 +192,18 @@ app.post("/api/generate-quote", (req, res) => {
 // Vite middleware & Static serving
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
+    const isAiStudioPreview = Boolean(
+      process.env.DISABLE_HMR === "true" ||
+      process.env.APPLET_ID ||
+      process.env.APP_URL?.includes("ais-") ||
+      process.env.K_SERVICE?.startsWith("ais-")
+    );
+
     const vite = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: isAiStudioPreview ? false : true,
+      },
       appType: "spa",
     });
     app.use(vite.middlewares);
