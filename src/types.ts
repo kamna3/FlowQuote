@@ -28,7 +28,11 @@ export interface QuoteServiceItem {
 }
 
 export interface QuoteDraft {
+  quote_number?: string;
+  created_at?: string;
+  valid_until?: string;
   customer_name: string;
+  customer_email?: string;
   company_name: string;
   services: QuoteServiceItem[];
   subtotal: number;

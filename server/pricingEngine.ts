@@ -5,6 +5,10 @@ import {
   type ComplexityLevel,
   type ServiceCategory,
 } from './pricingConfig';
+import {
+  generateQuoteNumber,
+  calculateValidUntilDate,
+} from './quoteConfig';
 
 export interface InquiryInput {
   customerName: string;
@@ -34,7 +38,11 @@ export interface QuoteServiceItem {
 }
 
 export interface CalculatedQuote {
+  quote_number: string;
+  created_at: string;
+  valid_until: string;
   customer_name: string;
+  customer_email?: string;
   company_name: string;
   services: QuoteServiceItem[];
   subtotal: number;
@@ -196,8 +204,15 @@ export function calculateQuote(
     else timeline = '6 - 8 weeks';
   }
 
+  const issueDate = new Date();
+  const validUntilDate = calculateValidUntilDate(issueDate);
+
   return {
+    quote_number: generateQuoteNumber(issueDate),
+    created_at: issueDate.toISOString(),
+    valid_until: validUntilDate.toISOString(),
     customer_name: inquiry.customerName || 'Valued Customer',
+    customer_email: inquiry.customerEmail?.trim() || '',
     company_name: inquiry.companyName?.trim() || '',
     services,
     subtotal,

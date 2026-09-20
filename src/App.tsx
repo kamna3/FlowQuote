@@ -11,6 +11,8 @@ import {
   RefreshCw,
   Receipt,
   FileCheck,
+  FileDown,
+  Check,
 } from 'lucide-react';
 
 const INITIAL_FORM_STATE: InquiryFormData = {
@@ -35,6 +37,11 @@ export default function App() {
   const [quoteDraft, setQuoteDraft] = useState<QuoteDraft | null>(null);
   const [isGeneratingQuote, setIsGeneratingQuote] = useState(false);
   const [quoteError, setQuoteError] = useState<string | null>(null);
+
+  // Step 4 State: PDF Generation
+  const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
+  const [pdfError, setPdfError] = useState<string | null>(null);
+  const [pdfDownloaded, setPdfDownloaded] = useState(false);
 
   const formatUSD = (amount: number) => {
     return new Intl.NumberFormat('en-US', {
@@ -121,6 +128,9 @@ export default function App() {
     setSubmittedInquiry(null);
     setQuoteDraft(null);
     setQuoteError(null);
+    setIsGeneratingPdf(false);
+    setPdfError(null);
+    setPdfDownloaded(false);
     setIsAnalyzing(true);
 
     try {
@@ -190,6 +200,67 @@ export default function App() {
     }
   };
 
+  const handleGeneratePDF = async () => {
+    if (!quoteDraft) return;
+
+    setIsGeneratingPdf(true);
+    setPdfError(null);
+    setPdfDownloaded(false);
+
+    try {
+      const inquiryPayload = submittedInquiry || formData;
+      const response = await fetch('/api/generate-quote-pdf', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          quote: quoteDraft,
+          inquiry: inquiryPayload,
+          analysis: aiAnalysis,
+        }),
+      });
+
+      if (!response.ok) {
+        let errorMsg = 'Failed to generate PDF quotation.';
+        try {
+          const errData = await response.json();
+          if (errData?.error) errorMsg = errData.error;
+        } catch {
+          // Non-JSON response
+        }
+        throw new Error(errorMsg);
+      }
+
+      // Determine filename from response header or quote number
+      const disposition = response.headers.get('Content-Disposition');
+      let filename = `FlowQuote_${quoteDraft.quote_number || 'Quotation'}.pdf`;
+      if (disposition && disposition.includes('filename=')) {
+        const match = disposition.match(/filename="?([^"]+)"?/);
+        if (match?.[1]) {
+          filename = match[1];
+        }
+      }
+
+      const blob = await response.blob();
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      window.URL.revokeObjectURL(downloadUrl);
+
+      setPdfDownloaded(true);
+    } catch (err: any) {
+      console.error('Failed to generate quotation PDF:', err);
+      setPdfError(err.message || 'An unexpected error occurred while generating the PDF.');
+    } finally {
+      setIsGeneratingPdf(false);
+    }
+  };
+
   const handleReset = () => {
     setFormData(INITIAL_FORM_STATE);
     setErrors({});
@@ -199,6 +270,9 @@ export default function App() {
     setQuoteDraft(null);
     setIsGeneratingQuote(false);
     setQuoteError(null);
+    setIsGeneratingPdf(false);
+    setPdfError(null);
+    setPdfDownloaded(false);
   };
 
   return (
@@ -689,26 +763,37 @@ export default function App() {
               </div>
             </div>
 
-            {/* Client Information */}
-            <div id="quote-client-info" className="grid grid-cols-1 sm:grid-cols-2 gap-3 bg-neutral-50 rounded-md p-4 border border-neutral-200 text-sm">
+            {/* Client & Quote Metadata */}
+            <div id="quote-client-info" className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-neutral-50 rounded-md p-4 border border-neutral-200 text-sm">
               <div>
                 <span className="text-xs font-medium text-neutral-500 block uppercase tracking-wider mb-1">
-                  Customer Name
+                  Quote Number
                 </span>
-                <span id="quote-customer-name" className="font-semibold text-neutral-900">
-                  {quoteDraft.customer_name}
+                <span id="quote-number-display" className="font-mono font-semibold text-neutral-900">
+                  {quoteDraft.quote_number || 'FQ-Draft'}
                 </span>
               </div>
               <div>
                 <span className="text-xs font-medium text-neutral-500 block uppercase tracking-wider mb-1">
-                  Company Name
+                  Customer Name
                 </span>
-                <span id="quote-company-name" className="text-neutral-900">
-                  {quoteDraft.company_name ? (
-                    quoteDraft.company_name
-                  ) : (
-                    <span className="text-neutral-400 italic">Not specified</span>
-                  )}
+                <span id="quote-customer-name" className="font-semibold text-neutral-900 block truncate">
+                  {quoteDraft.customer_name}
+                </span>
+                {quoteDraft.company_name ? (
+                  <span id="quote-company-name" className="text-xs text-neutral-600 block truncate">
+                    {quoteDraft.company_name}
+                  </span>
+                ) : (
+                  <span className="text-xs text-neutral-400 italic block">Individual Client</span>
+                )}
+              </div>
+              <div>
+                <span className="text-xs font-medium text-neutral-500 block uppercase tracking-wider mb-1">
+                  Quote Validity
+                </span>
+                <span id="quote-validity-display" className="text-neutral-900 font-medium">
+                  14 Days (Draft Proposal)
                 </span>
               </div>
             </div>
@@ -803,6 +888,70 @@ export default function App() {
                   {quoteDraft.payment_terms}
                 </span>
               </div>
+            </div>
+
+            {/* Step 4: PDF Generation Action */}
+            <div id="quote-pdf-action-container" className="pt-4 border-t border-neutral-200 space-y-3">
+              {/* PDF Error Banner if any */}
+              {pdfError && (
+                <div
+                  id="pdf-error-banner"
+                  className="border border-red-200 bg-red-50 rounded-lg p-4 flex items-start gap-3 text-red-900 text-sm"
+                >
+                  <AlertCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                  <div className="space-y-0.5">
+                    <h4 id="pdf-error-title" className="font-semibold text-red-900">
+                      PDF Generation Failed
+                    </h4>
+                    <p id="pdf-error-message" className="text-red-700">
+                      {pdfError}
+                    </p>
+                  </div>
+                </div>
+              )}
+
+              {/* PDF Download Success Confirmation */}
+              {pdfDownloaded && (
+                <div
+                  id="pdf-success-indicator"
+                  className="border border-emerald-200 bg-emerald-50 rounded-lg p-3.5 flex items-center justify-between text-emerald-900 text-xs"
+                >
+                  <div className="flex items-center gap-2">
+                    <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                    <span className="font-medium">Quotation PDF downloaded successfully.</span>
+                  </div>
+                  <span className="font-mono text-emerald-700 bg-emerald-100/60 px-2 py-0.5 rounded border border-emerald-200">
+                    Status: Draft Proposal
+                  </span>
+                </div>
+              )}
+
+              {/* Generate PDF Button */}
+              <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                <button
+                  id="generate-pdf-button"
+                  type="button"
+                  onClick={handleGeneratePDF}
+                  disabled={isGeneratingPdf}
+                  className="w-full sm:w-auto flex-1 py-3 px-5 bg-neutral-900 hover:bg-neutral-800 disabled:bg-neutral-300 text-white font-medium rounded-md text-sm transition-colors cursor-pointer disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:ring-offset-2 flex items-center justify-center gap-2 shadow-xs"
+                >
+                  {isGeneratingPdf ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin text-white" />
+                      <span>Generating Professional PDF...</span>
+                    </>
+                  ) : (
+                    <>
+                      <FileDown className="w-4 h-4 text-white" />
+                      <span>Generate PDF</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              <p id="pdf-action-note" className="text-center sm:text-left text-xs text-neutral-500">
+                Generates a printable business quotation PDF with FlowQuote branding, itemized scope, agreed terms, and unique quote identifier. Status remains Draft.
+              </p>
             </div>
           </section>
         )}

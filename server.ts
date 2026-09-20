@@ -4,6 +4,7 @@ import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import { calculateQuote } from "./server/pricingEngine";
+import { generateQuotePDF } from "./server/pdfGenerator";
 
 dotenv.config();
 
@@ -185,6 +186,54 @@ app.post("/api/generate-quote", (req, res) => {
     console.error("Error calculating quote:", error);
     return res.status(500).json({
       error: error.message || "Failed to calculate quote.",
+    });
+  }
+});
+
+// API: Generate Quote PDF
+app.post("/api/generate-quote-pdf", async (req, res) => {
+  try {
+    const { quote, inquiry, analysis } = req.body;
+
+    if (!quote || typeof quote !== "object") {
+      return res.status(400).json({
+        error: "Missing or invalid quote data payload to generate PDF.",
+      });
+    }
+
+    if (!quote.customer_name || !Array.isArray(quote.services) || quote.services.length === 0) {
+      return res.status(400).json({
+        error: "Quote data is missing required fields (customer_name or services).",
+      });
+    }
+
+    if (typeof quote.total !== "number" || isNaN(quote.total)) {
+      return res.status(400).json({
+        error: "Invalid total amount in quote data.",
+      });
+    }
+
+    // Generate deterministic PDF document buffer
+    const pdfBuffer = await generateQuotePDF({
+      quote,
+      inquiry,
+      analysis,
+    });
+
+    const safeQuoteNumber = quote.quote_number
+      ? String(quote.quote_number).replace(/[^a-zA-Z0-9-_]/g, "_")
+      : "Quotation";
+    const filename = `FlowQuote_${safeQuoteNumber}.pdf`;
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+    res.setHeader("Content-Length", pdfBuffer.length);
+
+    return res.status(200).send(pdfBuffer);
+  } catch (error: any) {
+    console.error("Error generating quote PDF:", error);
+    return res.status(500).json({
+      error: error.message || "Failed to generate quote PDF.",
     });
   }
 });
