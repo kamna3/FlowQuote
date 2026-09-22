@@ -41,6 +41,9 @@ export interface CalculatedQuote {
   quote_number: string;
   created_at: string;
   valid_until: string;
+  status: 'Draft' | 'Sent';
+  sent_at?: string;
+  sent_to?: string;
   customer_name: string;
   customer_email?: string;
   company_name: string;
@@ -211,6 +214,7 @@ export function calculateQuote(
     quote_number: generateQuoteNumber(issueDate),
     created_at: issueDate.toISOString(),
     valid_until: validUntilDate.toISOString(),
+    status: 'Draft',
     customer_name: inquiry.customerName || 'Valued Customer',
     customer_email: inquiry.customerEmail?.trim() || '',
     company_name: inquiry.companyName?.trim() || '',

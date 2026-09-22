@@ -13,6 +13,8 @@ import {
   FileCheck,
   FileDown,
   Check,
+  Send,
+  Mail,
 } from 'lucide-react';
 
 const INITIAL_FORM_STATE: InquiryFormData = {
@@ -24,6 +26,56 @@ const INITIAL_FORM_STATE: InquiryFormData = {
   budget: '',
   desiredDeadline: '',
 };
+
+interface ParsedResponse<T = any> {
+  ok: boolean;
+  status: number;
+  data: T | null;
+  error?: string;
+}
+
+async function parseJsonResponse<T = any>(response: Response): Promise<ParsedResponse<T>> {
+  const contentType = response.headers.get('content-type') || '';
+  if (contentType.includes('application/json')) {
+    try {
+      const data = await response.json();
+      const isSuccess = response.ok && data?.success !== false;
+      return {
+        ok: isSuccess,
+        status: response.status,
+        data,
+        error: data?.error || (isSuccess ? undefined : `Server returned status ${response.status}`),
+      };
+    } catch {
+      return {
+        ok: false,
+        status: response.status,
+        data: null,
+        error: 'Malformed JSON returned from server.',
+      };
+    }
+  }
+
+  // Handle HTML or text fallback from proxies (e.g. Cloud Run, Nginx)
+  const text = await response.text();
+  let cleanMsg = `Server returned HTTP ${response.status}.`;
+  if (response.status === 503 || text.includes('503 Service Unavailable')) {
+    cleanMsg = 'Service is temporarily unavailable or unconfigured on the server.';
+  } else if (response.status === 502 || text.includes('502 Bad Gateway')) {
+    cleanMsg = 'Gateway error communicating with upstream service.';
+  } else if (response.status === 504 || text.includes('504 Gateway Timeout')) {
+    cleanMsg = 'Server response timed out. Please try again.';
+  } else if (text && text.length < 150 && !text.includes('<')) {
+    cleanMsg = text;
+  }
+
+  return {
+    ok: false,
+    status: response.status,
+    data: null,
+    error: cleanMsg,
+  };
+}
 
 export default function App() {
   const [formData, setFormData] = useState<InquiryFormData>(INITIAL_FORM_STATE);
@@ -42,6 +94,15 @@ export default function App() {
   const [isGeneratingPdf, setIsGeneratingPdf] = useState(false);
   const [pdfError, setPdfError] = useState<string | null>(null);
   const [pdfDownloaded, setPdfDownloaded] = useState(false);
+
+  // Step 5 State: Email Quote via Gmail
+  const [isSendingEmail, setIsSendingEmail] = useState(false);
+  const [sendEmailError, setSendEmailError] = useState<string | null>(null);
+  const [sendEmailSuccess, setSendEmailSuccess] = useState<{
+    sentAt: string;
+    recipient: string;
+    quoteNumber: string;
+  } | null>(null);
 
   const formatUSD = (amount: number) => {
     return new Intl.NumberFormat('en-US', {
@@ -131,6 +192,9 @@ export default function App() {
     setIsGeneratingPdf(false);
     setPdfError(null);
     setPdfDownloaded(false);
+    setIsSendingEmail(false);
+    setSendEmailError(null);
+    setSendEmailSuccess(null);
     setIsAnalyzing(true);
 
     try {
@@ -142,12 +206,12 @@ export default function App() {
         body: JSON.stringify(formData),
       });
 
-      const data = await response.json();
+      const parsed = await parseJsonResponse(response);
 
-      if (!response.ok || !data.success) {
+      if (!parsed.ok || !parsed.data?.success) {
         const message =
-          data?.error ||
-          (response.status === 503
+          parsed.error ||
+          (response.status === 503 || response.status === 400
             ? 'Gemini server configuration is missing. GEMINI_API_KEY environment variable is not configured.'
             : 'An unexpected server error occurred while analyzing the inquiry.');
         setServerError(message);
@@ -155,7 +219,7 @@ export default function App() {
       }
 
       setSubmittedInquiry({ ...formData });
-      setAiAnalysis(data.analysis);
+      setAiAnalysis(parsed.data.analysis);
     } catch (err: any) {
       console.error('Failed to communicate with /api/analyze-inquiry:', err);
       setServerError(
@@ -185,13 +249,13 @@ export default function App() {
         }),
       });
 
-      const data = await response.json();
+      const parsed = await parseJsonResponse(response);
 
-      if (!response.ok || !data.success) {
-        throw new Error(data?.error || 'Failed to calculate quote from pricing engine.');
+      if (!parsed.ok || !parsed.data?.success) {
+        throw new Error(parsed.error || 'Failed to calculate quote from pricing engine.');
       }
 
-      setQuoteDraft(data.quote);
+      setQuoteDraft(parsed.data.quote);
     } catch (err: any) {
       console.error('Failed to generate quote:', err);
       setQuoteError(err.message || 'An unexpected error occurred while calculating the quote.');
@@ -261,6 +325,77 @@ export default function App() {
     }
   };
 
+  const handleSendQuote = async () => {
+    if (!quoteDraft) {
+      setSendEmailError('No active quote draft available to send.');
+      return;
+    }
+
+    const recipient = (
+      quoteDraft.customer_email ||
+      submittedInquiry?.customerEmail ||
+      formData.customerEmail ||
+      ''
+    ).trim();
+
+    if (!recipient) {
+      setSendEmailError('Customer email address is required to email the quotation. Please enter an email address.');
+      return;
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(recipient)) {
+      setSendEmailError(`Invalid recipient email address format: "${recipient}".`);
+      return;
+    }
+
+    setIsSendingEmail(true);
+    setSendEmailError(null);
+
+    try {
+      const inquiryPayload = submittedInquiry || formData;
+      const response = await fetch('/api/send-quote', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          quote: quoteDraft,
+          inquiry: inquiryPayload,
+          analysis: aiAnalysis,
+          recipientEmail: recipient,
+        }),
+      });
+
+      const parsed = await parseJsonResponse(response);
+
+      if (!parsed.ok || !parsed.data?.success) {
+        throw new Error(parsed.error || 'Failed to send quote email.');
+      }
+
+      const data = parsed.data;
+      // Update quoteDraft status to 'Sent' and record timestamp and recipient
+      const updatedQuote: QuoteDraft = {
+        ...quoteDraft,
+        status: 'Sent',
+        sent_at: data.sent_at || new Date().toISOString(),
+        sent_to: data.recipient || recipient,
+      };
+
+      setQuoteDraft(updatedQuote);
+      setSendEmailSuccess({
+        sentAt: data.sent_at || new Date().toISOString(),
+        recipient: data.recipient || recipient,
+        quoteNumber: data.quote_number || quoteDraft.quote_number || '',
+      });
+    } catch (err: any) {
+      console.error('Error sending quote email:', err);
+      setSendEmailError(err.message || 'An unexpected error occurred while sending the email.');
+    } finally {
+      setIsSendingEmail(false);
+    }
+  };
+
   const handleReset = () => {
     setFormData(INITIAL_FORM_STATE);
     setErrors({});
@@ -273,6 +408,9 @@ export default function App() {
     setIsGeneratingPdf(false);
     setPdfError(null);
     setPdfDownloaded(false);
+    setIsSendingEmail(false);
+    setSendEmailError(null);
+    setSendEmailSuccess(null);
   };
 
   return (
@@ -747,11 +885,18 @@ export default function App() {
                 <div>
                   <div className="flex items-center gap-2">
                     <h2 id="quote-draft-title" className="text-xl font-bold text-neutral-950">
-                      Quote Draft
+                      Quote Review
                     </h2>
-                    <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-neutral-100 text-neutral-800 border border-neutral-200">
-                      Draft Proposal
-                    </span>
+                    {quoteDraft.status === 'Sent' ? (
+                      <span id="quote-status-badge" className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded text-xs font-medium bg-emerald-50 text-emerald-700 border border-emerald-200">
+                        <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                        Sent
+                      </span>
+                    ) : (
+                      <span id="quote-status-badge" className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-neutral-100 text-neutral-800 border border-neutral-200">
+                        Draft
+                      </span>
+                    )}
                   </div>
                   <p id="quote-draft-subtitle" className="text-xs text-neutral-500">
                     Deterministic pricing calculated from predefined rules
@@ -762,6 +907,31 @@ export default function App() {
                 <span>Pricing Rules Engine v1.0</span>
               </div>
             </div>
+
+            {/* Sent Status Banner if Sent */}
+            {quoteDraft.status === 'Sent' && quoteDraft.sent_at && (
+              <div id="quote-sent-banner" className="border border-emerald-200 bg-emerald-50/80 rounded-md p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs text-emerald-900">
+                <div className="flex items-center gap-2">
+                  <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+                  <span>
+                    Approved quotation emailed to <strong>{quoteDraft.sent_to || quoteDraft.customer_email}</strong> on{' '}
+                    {new Date(quoteDraft.sent_at).toLocaleDateString('en-US', {
+                      month: 'short',
+                      day: 'numeric',
+                      year: 'numeric',
+                    })}{' '}
+                    at{' '}
+                    {new Date(quoteDraft.sent_at).toLocaleTimeString('en-US', {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                </div>
+                <span className="font-mono text-emerald-800 bg-emerald-100 px-2 py-0.5 rounded border border-emerald-300 shrink-0">
+                  Status: Sent
+                </span>
+              </div>
+            )}
 
             {/* Client & Quote Metadata */}
             <div id="quote-client-info" className="grid grid-cols-1 sm:grid-cols-3 gap-3 bg-neutral-50 rounded-md p-4 border border-neutral-200 text-sm">
@@ -890,8 +1060,116 @@ export default function App() {
               </div>
             </div>
 
-            {/* Step 4: PDF Generation Action */}
-            <div id="quote-pdf-action-container" className="pt-4 border-t border-neutral-200 space-y-3">
+            {/* Step 4 & 5: Review & Send Actions */}
+            <div id="quote-actions-container" className="pt-5 border-t border-neutral-200 space-y-4">
+              {/* Send Email Error Banner or Configuration Guide */}
+              {sendEmailError && (
+                sendEmailError.includes('GMAIL_USER') ||
+                sendEmailError.includes('not configured') ||
+                sendEmailError.includes('GMAIL_APP_PASSWORD') ? (
+                  <div
+                    id="email-setup-banner"
+                    className="border border-amber-300 bg-amber-50/95 rounded-lg p-4 sm:p-5 text-amber-950 text-sm space-y-3 shadow-xs"
+                  >
+                    <div className="flex items-start gap-3">
+                      <AlertCircle className="w-5 h-5 text-amber-700 shrink-0 mt-0.5" />
+                      <div className="space-y-1 flex-1">
+                        <div className="flex items-center justify-between">
+                          <h4 id="email-setup-title" className="font-semibold text-amber-950">
+                            Gmail Configuration Required to Dispatch Live Emails
+                          </h4>
+                          <button
+                            type="button"
+                            onClick={() => setSendEmailError(null)}
+                            className="text-amber-700 hover:text-amber-900 text-xs font-medium cursor-pointer"
+                          >
+                            Dismiss
+                          </button>
+                        </div>
+                        <p id="email-setup-message" className="text-amber-900 text-xs sm:text-sm">
+                          Direct email dispatch requires setting two environment variables in your project settings:
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="bg-white/90 rounded border border-amber-200 p-3 text-xs space-y-2 font-mono">
+                      <div>
+                        <strong className="text-neutral-900">1. GMAIL_USER</strong>
+                        <div className="text-neutral-600 font-sans mt-0.5">
+                          Your sender Gmail address (e.g. <span className="font-mono">yourname@gmail.com</span>).
+                        </div>
+                      </div>
+                      <div className="pt-1.5 border-t border-amber-100">
+                        <strong className="text-neutral-900">2. GMAIL_APP_PASSWORD</strong>
+                        <div className="text-neutral-600 font-sans mt-0.5">
+                          A 16-character Google App Password (from Google Account &rarr; Security &rarr; 2-Step Verification &rarr; App passwords).
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pt-1">
+                      <p className="text-xs text-amber-800">
+                        💡 <em>Tip: You do not need to configure email to get your quote. You can download the PDF directly!</em>
+                      </p>
+                      <button
+                        type="button"
+                        onClick={handleGeneratePDF}
+                        disabled={isGeneratingPdf}
+                        className="inline-flex items-center justify-center gap-1.5 px-3.5 py-1.5 bg-neutral-900 hover:bg-neutral-800 text-white rounded text-xs font-medium cursor-pointer transition-colors shadow-xs shrink-0"
+                      >
+                        <FileDown className="w-3.5 h-3.5" />
+                        <span>Download PDF Directly</span>
+                      </button>
+                    </div>
+                  </div>
+                ) : (
+                  <div
+                    id="email-error-banner"
+                    className="border border-red-200 bg-red-50 rounded-lg p-4 flex items-start gap-3 text-red-900 text-sm"
+                  >
+                    <AlertCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                    <div className="space-y-1 flex-1">
+                      <div className="flex items-center justify-between">
+                        <h4 id="email-error-title" className="font-semibold text-red-900">
+                          Unable to Send Quotation Email
+                        </h4>
+                        <button
+                          type="button"
+                          onClick={() => setSendEmailError(null)}
+                          className="text-red-700 hover:text-red-900 text-xs font-medium cursor-pointer"
+                        >
+                          Dismiss
+                        </button>
+                      </div>
+                      <p id="email-error-message" className="text-red-700">
+                        {sendEmailError}
+                      </p>
+                    </div>
+                  </div>
+                )
+              )}
+
+              {/* Send Email Success Banner */}
+              {sendEmailSuccess && (
+                <div
+                  id="email-success-banner"
+                  className="border border-emerald-200 bg-emerald-50 rounded-lg p-4 flex items-start gap-3 text-emerald-900 text-sm"
+                >
+                  <CheckCircle2 className="w-5 h-5 text-emerald-600 shrink-0 mt-0.5" />
+                  <div className="space-y-1">
+                    <h4 id="email-success-title" className="font-semibold text-emerald-900">
+                      Quotation Successfully Sent
+                    </h4>
+                    <p id="email-success-message" className="text-emerald-800">
+                      The official quotation PDF (Quote #{sendEmailSuccess.quoteNumber}) was sent to <strong>{sendEmailSuccess.recipient}</strong>.
+                    </p>
+                    <p id="email-success-timestamp" className="text-xs text-emerald-700 font-mono">
+                      Timestamp: {new Date(sendEmailSuccess.sentAt).toLocaleString()} • Quote Status: Sent
+                    </p>
+                  </div>
+                </div>
+              )}
+
               {/* PDF Error Banner if any */}
               {pdfError && (
                 <div
@@ -918,40 +1196,71 @@ export default function App() {
                 >
                   <div className="flex items-center gap-2">
                     <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
-                    <span className="font-medium">Quotation PDF downloaded successfully.</span>
+                    <span className="font-medium">Quotation PDF downloaded to your device.</span>
                   </div>
                   <span className="font-mono text-emerald-700 bg-emerald-100/60 px-2 py-0.5 rounded border border-emerald-200">
-                    Status: Draft Proposal
+                    Status: {quoteDraft.status || 'Draft'}
                   </span>
                 </div>
               )}
 
-              {/* Generate PDF Button */}
+              {/* Action Buttons: Send Quote (Primary) & Generate PDF (Secondary) */}
               <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3">
+                <button
+                  id="send-quote-button"
+                  type="button"
+                  onClick={handleSendQuote}
+                  disabled={isSendingEmail || isGeneratingPdf}
+                  className="flex-1 py-3 px-5 bg-neutral-900 hover:bg-neutral-800 disabled:bg-neutral-300 text-white font-medium rounded-md text-sm transition-colors cursor-pointer disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:ring-offset-2 flex items-center justify-center gap-2 shadow-xs"
+                >
+                  {isSendingEmail ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin text-white" />
+                      <span>Sending Quotation via Gmail...</span>
+                    </>
+                  ) : quoteDraft.status === 'Sent' ? (
+                    <>
+                      <Send className="w-4 h-4 text-white" />
+                      <span>Resend Quote</span>
+                    </>
+                  ) : (
+                    <>
+                      <Send className="w-4 h-4 text-white" />
+                      <span>Send Quote</span>
+                    </>
+                  )}
+                </button>
+
                 <button
                   id="generate-pdf-button"
                   type="button"
                   onClick={handleGeneratePDF}
-                  disabled={isGeneratingPdf}
-                  className="w-full sm:w-auto flex-1 py-3 px-5 bg-neutral-900 hover:bg-neutral-800 disabled:bg-neutral-300 text-white font-medium rounded-md text-sm transition-colors cursor-pointer disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:ring-offset-2 flex items-center justify-center gap-2 shadow-xs"
+                  disabled={isGeneratingPdf || isSendingEmail}
+                  className="py-3 px-5 bg-white hover:bg-neutral-50 disabled:bg-neutral-100 text-neutral-800 disabled:text-neutral-400 font-medium rounded-md text-sm border border-neutral-300 transition-colors cursor-pointer disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-neutral-900 focus:ring-offset-2 flex items-center justify-center gap-2 shadow-xs"
                 >
                   {isGeneratingPdf ? (
                     <>
-                      <RefreshCw className="w-4 h-4 animate-spin text-white" />
-                      <span>Generating Professional PDF...</span>
+                      <RefreshCw className="w-4 h-4 animate-spin text-neutral-600" />
+                      <span>Generating PDF...</span>
                     </>
                   ) : (
                     <>
-                      <FileDown className="w-4 h-4 text-white" />
+                      <FileDown className="w-4 h-4 text-neutral-700" />
                       <span>Generate PDF</span>
                     </>
                   )}
                 </button>
               </div>
 
-              <p id="pdf-action-note" className="text-center sm:text-left text-xs text-neutral-500">
-                Generates a printable business quotation PDF with FlowQuote branding, itemized scope, agreed terms, and unique quote identifier. Status remains Draft.
-              </p>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between text-xs text-neutral-500 gap-1.5 pt-1">
+                <span>
+                  Recipient:{' '}
+                  <strong className="text-neutral-700 font-medium">
+                    {quoteDraft.customer_email || submittedInquiry?.customerEmail || formData.customerEmail || 'No email specified'}
+                  </strong>
+                </span>
+                <span>Human Approval Required: Quote remains Draft until explicit delivery.</span>
+              </div>
             </div>
           </section>
         )}

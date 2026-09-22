@@ -5,6 +5,7 @@ import { GoogleGenAI, Type } from "@google/genai";
 import dotenv from "dotenv";
 import { calculateQuote } from "./server/pricingEngine";
 import { generateQuotePDF } from "./server/pdfGenerator";
+import { sendQuoteEmail, getGmailServiceStatus } from "./server/emailService";
 
 dotenv.config();
 
@@ -46,7 +47,7 @@ app.post("/api/analyze-inquiry", async (req, res) => {
 
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
-      return res.status(503).json({
+      return res.status(400).json({
         error:
           "Gemini server configuration is missing. GEMINI_API_KEY environment variable is not configured.",
       });
@@ -234,6 +235,133 @@ app.post("/api/generate-quote-pdf", async (req, res) => {
     console.error("Error generating quote PDF:", error);
     return res.status(500).json({
       error: error.message || "Failed to generate quote PDF.",
+    });
+  }
+});
+
+// API: Check Gmail service status (without exposing secrets)
+app.get("/api/email-status", (_req, res) => {
+  const status = getGmailServiceStatus();
+  return res.json(status);
+});
+
+// API: Send approved Quote PDF to Customer via Gmail
+app.post("/api/send-quote", async (req, res) => {
+  try {
+    const { quote, inquiry, analysis, recipientEmail } = req.body;
+
+    // 1. Validate quote payload
+    if (!quote || typeof quote !== "object") {
+      return res.status(400).json({
+        error: "Missing or invalid quote data payload.",
+      });
+    }
+
+    if (!quote.customer_name || typeof quote.customer_name !== "string" || !quote.customer_name.trim()) {
+      return res.status(400).json({
+        error: "Quote data is missing customer name.",
+      });
+    }
+
+    if (!quote.quote_number || typeof quote.quote_number !== "string") {
+      return res.status(400).json({
+        error: "Quote data is missing a valid quote number.",
+      });
+    }
+
+    if (!Array.isArray(quote.services) || quote.services.length === 0) {
+      return res.status(400).json({
+        error: "Quote data contains no service line items.",
+      });
+    }
+
+    if (typeof quote.total !== "number" || isNaN(quote.total)) {
+      return res.status(400).json({
+        error: "Quote data contains invalid total pricing.",
+      });
+    }
+
+    // 2. Determine and validate recipient email
+    const targetEmail = (
+      recipientEmail ||
+      quote.customer_email ||
+      inquiry?.customerEmail ||
+      ""
+    ).trim();
+
+    if (!targetEmail) {
+      return res.status(400).json({
+        error: "Customer email address is required to send the quotation.",
+      });
+    }
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    if (!emailRegex.test(targetEmail)) {
+      return res.status(400).json({
+        error: `Invalid recipient email format: "${targetEmail}".`,
+      });
+    }
+
+    // 3. Check server Gmail configuration
+    const gmailStatus = getGmailServiceStatus();
+    if (!gmailStatus.configured) {
+      return res.status(400).json({
+        error: "Gmail service is not configured on the server. Please provide GMAIL_USER and GMAIL_APP_PASSWORD in the environment variables.",
+        code: "GMAIL_UNCONFIGURED",
+        missing: gmailStatus.missing,
+      });
+    }
+
+    // 4. Send email with PDF attachment
+    const result = await sendQuoteEmail({
+      recipientEmail: targetEmail,
+      quote,
+      inquiry,
+      analysis,
+    });
+
+    return res.status(200).json({
+      success: true,
+      status: "Sent",
+      quote_number: result.quoteNumber,
+      recipient: result.recipient,
+      sent_at: result.sentAt,
+      message: `Quotation email successfully sent to ${result.recipient}.`,
+    });
+  } catch (error: any) {
+    console.error("Error executing send-quote:", error?.message || error);
+
+    if (error?.name === "GmailConfigurationError") {
+      return res.status(400).json({
+        error: error.message,
+        code: "GMAIL_UNCONFIGURED",
+      });
+    }
+
+    // Check for authentication failure
+    if (
+      error?.code === "EAUTH" ||
+      error?.responseCode === 535 ||
+      error?.message?.includes("Invalid login") ||
+      error?.message?.includes("Username and Password not accepted")
+    ) {
+      return res.status(400).json({
+        error: "Gmail authentication failed. Please verify that your GMAIL_USER and GMAIL_APP_PASSWORD are valid and that 2-Step Verification with an App Password is used.",
+        code: "GMAIL_AUTH_FAILED",
+      });
+    }
+
+    // Check for connection/network error
+    if (error?.code === "ESOCKET" || error?.code === "ECONNECTION" || error?.code === "ETIMEDOUT") {
+      return res.status(400).json({
+        error: "Network timeout or connection error contacting Gmail servers. Please try again.",
+        code: "NETWORK_ERROR",
+      });
+    }
+
+    return res.status(400).json({
+      error: error?.message || "Failed to send quotation email via Gmail.",
+      code: "GMAIL_SEND_FAILED",
     });
   }
 });

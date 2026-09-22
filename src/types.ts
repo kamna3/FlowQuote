@@ -31,6 +31,9 @@ export interface QuoteDraft {
   quote_number?: string;
   created_at?: string;
   valid_until?: string;
+  status?: 'Draft' | 'Sent';
+  sent_at?: string;
+  sent_to?: string;
   customer_name: string;
   customer_email?: string;
   company_name: string;
